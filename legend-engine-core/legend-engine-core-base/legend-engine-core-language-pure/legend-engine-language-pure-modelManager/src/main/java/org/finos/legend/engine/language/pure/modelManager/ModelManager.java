@@ -61,8 +61,61 @@ public class ModelManager
     // TODO: consider renaming this to UNSAFE/DEPRECATED_objectMapper
     //-------------------------------------------------------------------------------------------------
     public static final ObjectMapper objectMapper = ObjectMapperFactory.getNewStandardObjectMapperWithPureProtocolExtensionSupports();
-    public final Cache<PureModelContext, PureModel> pureModelCache = CacheBuilder.newBuilder().recordStats().softValues().expireAfterAccess(30, TimeUnit.MINUTES).build();
-    public final Cache<PureModelContext, PureModelContextData> pureModelContextCache = CacheBuilder.newBuilder().recordStats().softValues().expireAfterAccess(30, TimeUnit.MINUTES).build();
+    /**
+     * Cache bounds, expressed in <em>model elements</em> rather than entries, because the cost of a
+     * cached model is driven by its size, not by how many are held. Measured at roughly 3.4 KB of
+     * retained heap per element, so the default 100,000 corresponds to on the order of 340 MB.
+     *
+     * <p>Previously these caches had no {@code maximumSize} or {@code maximumWeight} at all: only
+     * {@code softValues()} and a 30-minute idle expiry. Soft references are cleared only when the
+     * JVM is already close to exhaustion, so the resident set grew to fill the heap by design and
+     * the collector was pushed into a full-collect-then-evict cycle instead of keeping headroom.
+     */
+    private static final long MAX_CACHED_MODEL_ELEMENTS = Long.getLong("org.finos.legend.engine.modelManager.maxCachedModelElements", 100_000L);
+    private static final long MAX_CACHED_DATA_ELEMENTS = Long.getLong("org.finos.legend.engine.modelManager.maxCachedDataElements", 200_000L);
+
+    public final Cache<PureModelContext, PureModel> pureModelCache = CacheBuilder.newBuilder()
+            .recordStats()
+            .softValues()
+            .maximumWeight(MAX_CACHED_MODEL_ELEMENTS)
+            .weigher((PureModelContext key, PureModel model) -> weigh(model))
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .build();
+    public final Cache<PureModelContext, PureModelContextData> pureModelContextCache = CacheBuilder.newBuilder()
+            .recordStats()
+            .softValues()
+            .maximumWeight(MAX_CACHED_DATA_ELEMENTS)
+            .weigher((PureModelContext key, PureModelContextData data) -> weigh(data))
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .build();
+
+    private static int weigh(PureModel model)
+    {
+        try
+        {
+            // A model always costs something, even an empty one: never weigh zero, or Guava will
+            // treat the entry as free and the bound stops meaning anything.
+            return Math.max(1, model.getPackageableElements().size());
+        }
+        catch (RuntimeException e)
+        {
+            // Weighing must never fail an insertion; fall back to a nominal weight.
+            return 1;
+        }
+    }
+
+    private static int weigh(PureModelContextData data)
+    {
+        try
+        {
+            return Math.max(1, data.getElements().size());
+        }
+        catch (RuntimeException e)
+        {
+            return 1;
+        }
+    }
+
     private final DeploymentMode deploymentMode;
     private final MutableList<ModelLoader> modelLoaders;
     private final Tracer tracer;
